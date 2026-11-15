@@ -1,0 +1,53 @@
+name: OneDTools
+options:
+  bundleIdPrefix: dev.hahach
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # 无签名出包（CI 传 CODE_SIGNING_ALLOWED=NO，LiveContainer 侧载）：
+    # 不设开发者团队、不配任何能力——无相机、无 URL scheme、无推送、无本地网络。
+
+packages:
+  Core1D:
+    path: ../Core
+
+targets:
+  OneDTools:
+    type: application
+    platform: iOS
+    sources:
+      - path: OneDTools
+    dependencies:
+      - package: Core1D
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.hahach.onedtools
+        ASSET_CATALOG_APP_ICON_NAME: AppIcon
+        # iPhone-only：单列竖版布局；iPad 上以兼容模式安装，够用。
+        TARGETED_DEVICE_FAMILY: "1"
+    # Info.plist 由 xcodegen 生成管理（generate 时写出），仓库不存手写副本。
+    # 版本两键写引用不写字面量：字面量会压过 xcodebuild 命令行传入的
+    # CURRENT_PROJECT_VERSION（run_number），导致每次出包版本号都是 1。
+    info:
+      path: OneDTools/Info.plist
+      properties:
+        CFBundleDisplayName: 简易热力
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # 不做任何联网与密码学调用：无非豁免加密。
+        ITSAppUsesNonExemptEncryption: false
+
+schemes:
+  OneDTools:
+    build:
+      targets:
+        OneDTools: all

@@ -1,0 +1,121 @@
+name: build
+
+# fun2 公开仓专用 CI（本文件是模板：路径一律公开仓布局，由导出脚本原样
+# 复制为 .github/workflows/build.yml；放在私有仓 scripts/ 下不会被 GitHub 执行）。
+# core-tests：ubuntu（1× 分钟）跑 Core 单测；ipa：macOS（按 10× 计费，约 2 分钟/次）出无签名 IPA。
+# 推 main 即全跑：macOS 分钟有限，攒有意义的改动再推。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  # 不取消：ipa 末尾覆盖上传 Release，跑到一半被取消可能留下半截资产。
+  cancel-in-progress: false
+
+jobs:
+  core-tests:
+    name: core tests (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: Core
+    steps:
+      - uses: actions/checkout@v4
+      # 零第三方依赖，不做 SwiftPM 缓存：冷构建也就几十秒。
+      # 工具链用 runner 预装的 swift，不显式安装（照兄弟仓已验证的做法）。
+      - name: toolchain
+        run: swift --version
+      - name: test
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee test-output.log
+
+      # 日志 API 匿名不可读：失败时把错误行写成 ::error:: 注解（注解接口匿名可查）
+      - name: surface errors
+        if: failure()
+        run: |
+          { grep -nE 'error:|Testing failed' test-output.log | head -40 || true; echo '--- tail ---'; tail -12 test-output.log; } > surface.txt
+          echo "::error::$(tr '\n' '|' < surface.txt | head -c 3800)"
+
+  ipa:
+    name: unsigned ipa (macos)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: xcodegen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            curl -fsSL -o xcodegen.zip https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip
+            unzip -q xcodegen.zip
+            echo "$PWD/xcodegen/bin" >> "$GITHUB_PATH"
+          fi
+          # GITHUB_PATH 只对后续 step 生效，本 step 用绝对路径自检
+          "$PWD/xcodegen/bin/xcodegen" --version 2>/dev/null || xcodegen --version
+
+      - name: generate project
+        run: xcodegen generate
+
+      - name: archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project OneDTools.xcodeproj \
+            -scheme OneDTools \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/OneDTools.xcarchive \
+            -derivedDataPath build/dd \
+            -clonedSourcePackagesDirPath build/spm \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} 2>&1 | tee archive-output.log
+
+      # 同 core-tests：失败时错误行进注解（匿名可查）
+      - name: surface errors
+        if: failure()
+        run: |
+          { grep -nE 'error:' archive-output.log | head -40 || true; echo '--- tail ---'; tail -12 archive-output.log; } > surface.txt
+          echo "::error::$(tr '\n' '|' < surface.txt | head -c 3800)"
+
+      - name: package ipa
+        run: |
+          APP=$(find build/OneDTools.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP"
+          rm -rf Payload OneDTools-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry OneDTools-unsigned.ipa Payload
+          ls -lh OneDTools-unsigned.ipa
+
+      - name: publish to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=ios-latest
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "iOS unsigned IPA (latest)" \
+              --notes "Unsigned IPA for LiveContainer. Latest build: #${{ github.run_number }} from ${{ github.sha }}."
+          fi
+          gh release upload "$TAG" OneDTools-unsigned.ipa --clobber
+          gh release edit "$TAG" --notes "Unsigned IPA for LiveContainer. Latest build: #${{ github.run_number }} from ${{ github.sha }}."
